@@ -12,11 +12,7 @@ fn bench_atac_shift(c: &mut Criterion) {
     c.bench_function("rsomics-atac-shift golden", |b| {
         b.iter(|| {
             let status = Command::new(black_box(bin))
-                .args([
-                    bam.to_str().unwrap(),
-                    "-o",
-                    out.path().to_str().unwrap(),
-                ])
+                .args([bam.to_str().unwrap(), "-o", out.path().to_str().unwrap()])
                 .status()
                 .unwrap();
             assert!(status.success());
