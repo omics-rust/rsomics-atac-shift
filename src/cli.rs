@@ -85,7 +85,7 @@ impl Tool for Cli {
 
 fn parse_flag_hex(s: &str) -> Result<u16> {
     let trimmed = s.trim();
-    let result = if let Some(hex) = trimmed
+    let v = if let Some(hex) = trimmed
         .strip_prefix("0x")
         .or_else(|| trimmed.strip_prefix("0X"))
     {
@@ -93,7 +93,7 @@ fn parse_flag_hex(s: &str) -> Result<u16> {
     } else {
         trimmed.parse::<u16>()
     };
-    result.map_err(|e| RsomicsError::InvalidInput(format!("invalid --skip-flags '{s}': {e}")))
+    v.map_err(|e| RsomicsError::InvalidInput(format!("invalid --skip-flags '{s}': {e}")))
 }
 
 pub static HELP: HelpSpec = HelpSpec {
