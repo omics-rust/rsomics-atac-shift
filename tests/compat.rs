@@ -1,15 +1,21 @@
 //! Compatibility against `deeptools alignmentSieve --ATACshift` v3.5.6.
 //!
 //! Two flavours. The `*_matches_golden` tests diff ours against a committed
-//! golden captured once from alignmentSieve and always run in CI (samtools is
-//! enough to read the BAMs). The live-oracle tests re-shift through
-//! alignmentSieve itself and self-skip when deeptools isn't installed.
+//! golden captured once from alignmentSieve; they decode both BAMs in-process
+//! with noodles and always run in CI (no samtools, no live oracle). The
+//! live-oracle tests re-shift through alignmentSieve itself and self-skip when
+//! deeptools isn't installed.
 //!
 //! Comparison is field-level (name, flag, pos, cigar, tlen, pnext), sorted by
 //! (name, flag): byte-exact BAM diff is impossible since deeptools stamps a
 //! different @PG header and may emit records in a different order.
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::Command;
+
+use noodles::bam;
+use noodles::sam;
+use noodles::sam::alignment::io::Write as _;
 
 fn fixture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden")
@@ -22,11 +28,7 @@ fn alignmentsieve_available() -> bool {
         .is_ok()
 }
 
-fn samtools_available() -> bool {
-    Command::new("samtools").arg("--version").output().is_ok()
-}
-
-/// Parse `samtools view` text output into (name, flag, pos_1based, cigar, tlen, next_pos_1based) tuples,
+/// Parse headerless SAM lines into (name, flag, pos_1based, cigar, tlen, next_pos_1based) tuples,
 /// sorted by (name, flag) so output-order differences between tools don't produce false mismatches.
 fn parse_sam_fields_sorted(output: &str) -> Vec<(String, u16, i64, String, i32, i64)> {
     let mut records: Vec<(String, u16, i64, String, i32, i64)> = output
@@ -47,14 +49,21 @@ fn parse_sam_fields_sorted(output: &str) -> Vec<(String, u16, i64, String, i32, 
     records
 }
 
+/// Decode a BAM into headerless SAM record lines, the same shape `samtools view`
+/// emits, so the records can be field-diffed without spawning samtools.
 fn bam_to_sam_text(bam: &std::path::Path) -> String {
-    let out = Command::new("samtools")
-        .args(["view", "-h"])
-        .arg(bam)
-        .output()
-        .expect("samtools view failed");
-    assert!(out.status.success(), "samtools view exited non-zero");
-    String::from_utf8(out.stdout).expect("samtools output not UTF-8")
+    let mut reader = bam::io::reader::Builder.build_from_path(bam).unwrap();
+    let header = reader.read_header().unwrap();
+
+    let mut out = Vec::new();
+    let mut writer = sam::io::Writer::new(&mut out);
+    for result in reader.records() {
+        writer
+            .write_alignment_record(&header, &result.unwrap())
+            .unwrap();
+    }
+    writer.get_mut().flush().unwrap();
+    String::from_utf8(out).unwrap()
 }
 
 type SamFields = (String, u16, i64, String, i32, i64);
@@ -122,8 +131,8 @@ fn run_compat_check(input_bam: &std::path::Path) {
 }
 
 /// Diff ours against a committed golden produced once by `alignmentSieve
-/// --ATACshift` v3.5.6. Always runs in CI: needs neither deeptools nor a live
-/// oracle, only samtools (present on all CI runners) to read the BAMs.
+/// --ATACshift` v3.5.6. Always runs in CI: both BAMs are decoded in-process via
+/// noodles, so neither deeptools nor samtools need be installed.
 fn run_golden_check(input_bam: &std::path::Path, golden_bam: &std::path::Path) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let our_out = tmp.path().join("our_shifted.bam");
@@ -138,10 +147,6 @@ fn run_golden_check(input_bam: &std::path::Path, golden_bam: &std::path::Path) {
 fn atac_shift_matches_deeptools() {
     if !alignmentsieve_available() {
         eprintln!("SKIP: alignmentSieve not found (deeptools not installed)");
-        return;
-    }
-    if !samtools_available() {
-        eprintln!("SKIP: samtools not found");
         return;
     }
 
@@ -165,10 +170,6 @@ fn atac_shift_matches_deeptools() {
 fn atac_shift_softclip_compat() {
     if !alignmentsieve_available() {
         eprintln!("SKIP: alignmentSieve not found (deeptools not installed)");
-        return;
-    }
-    if !samtools_available() {
-        eprintln!("SKIP: samtools not found");
         return;
     }
 

@@ -748,6 +748,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "criterion",
+ "noodles",
  "rsomics-bamio",
  "rsomics-common",
  "rsomics-help",
