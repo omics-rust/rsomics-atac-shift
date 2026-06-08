@@ -1,13 +1,13 @@
-/// Compatibility test against `deeptools alignmentSieve --ATACshift` v3.5.6.
-///
-/// Checks field-by-field match (name, flag, tid, pos, cigar, tlen, next_pos)
-/// between our output and the deeptools golden fixture. Byte-exact BAM
-/// comparison is not feasible because deeptools writes different @PG headers;
-/// instead, we compare the semantically meaningful record fields.
-///
-/// The test self-skips when:
-/// - `alignmentSieve` is not on PATH (deeptools not installed).
-/// - The fixture BAM is absent (stripped test env).
+//! Compatibility against `deeptools alignmentSieve --ATACshift` v3.5.6.
+//!
+//! Two flavours. The `*_matches_golden` tests diff ours against a committed
+//! golden captured once from alignmentSieve and always run in CI (samtools is
+//! enough to read the BAMs). The live-oracle tests re-shift through
+//! alignmentSieve itself and self-skip when deeptools isn't installed.
+//!
+//! Comparison is field-level (name, flag, pos, cigar, tlen, pnext), sorted by
+//! (name, flag): byte-exact BAM diff is impossible since deeptools stamps a
+//! different @PG header and may emit records in a different order.
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -57,22 +57,50 @@ fn bam_to_sam_text(bam: &std::path::Path) -> String {
     String::from_utf8(out.stdout).expect("samtools output not UTF-8")
 }
 
-fn run_compat_check(input_bam: &std::path::Path) {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let our_out = tmp.path().join("our_shifted.bam");
-    let dt_out = tmp.path().join("dt_shifted.bam");
+type SamFields = (String, u16, i64, String, i32, i64);
 
+fn run_ours(input_bam: &std::path::Path, out: &std::path::Path) {
     let binary = env!("CARGO_BIN_EXE_rsomics-atac-shift");
     let status = Command::new(binary)
         .args([
             input_bam.to_str().unwrap(),
             "-o",
-            our_out.to_str().unwrap(),
+            out.to_str().unwrap(),
             "-q",
         ])
         .status()
         .expect("rsomics-atac-shift failed to launch");
     assert!(status.success(), "rsomics-atac-shift exited non-zero");
+}
+
+fn assert_fields_eq(ours: &[SamFields], expect: &[SamFields], oracle: &str) {
+    assert_eq!(
+        ours.len(),
+        expect.len(),
+        "record count mismatch: ours={} {oracle}={}",
+        ours.len(),
+        expect.len()
+    );
+    for (i, (a, b)) in ours.iter().zip(expect.iter()).enumerate() {
+        assert_eq!(a.0, b.0, "record {i}: name {:?} vs {:?}", a.0, b.0);
+        assert_eq!(a.1, b.1, "record {i} ({}): flag {} vs {}", a.0, a.1, b.1);
+        assert_eq!(a.2, b.2, "record {i} ({}): POS {} vs {}", a.0, a.2, b.2);
+        assert_eq!(
+            a.3, b.3,
+            "record {i} ({}): CIGAR {:?} vs {:?}",
+            a.0, a.3, b.3
+        );
+        assert_eq!(a.4, b.4, "record {i} ({}): TLEN {} vs {}", a.0, a.4, b.4);
+        assert_eq!(a.5, b.5, "record {i} ({}): PNEXT {} vs {}", a.0, a.5, b.5);
+    }
+}
+
+fn run_compat_check(input_bam: &std::path::Path) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let our_out = tmp.path().join("our_shifted.bam");
+    let dt_out = tmp.path().join("dt_shifted.bam");
+
+    run_ours(input_bam, &our_out);
 
     let dt_status = Command::new("alignmentSieve")
         .args([
@@ -88,52 +116,22 @@ fn run_compat_check(input_bam: &std::path::Path) {
         .expect("alignmentSieve failed to launch");
     assert!(dt_status.success(), "alignmentSieve exited non-zero");
 
-    let our_sam = bam_to_sam_text(&our_out);
-    let dt_sam = bam_to_sam_text(&dt_out);
+    let our_records = parse_sam_fields_sorted(&bam_to_sam_text(&our_out));
+    let dt_records = parse_sam_fields_sorted(&bam_to_sam_text(&dt_out));
+    assert_fields_eq(&our_records, &dt_records, "deeptools");
+}
 
-    let our_records = parse_sam_fields_sorted(&our_sam);
-    let dt_records = parse_sam_fields_sorted(&dt_sam);
+/// Diff ours against a committed golden produced once by `alignmentSieve
+/// --ATACshift` v3.5.6. Always runs in CI: needs neither deeptools nor a live
+/// oracle, only samtools (present on all CI runners) to read the BAMs.
+fn run_golden_check(input_bam: &std::path::Path, golden_bam: &std::path::Path) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let our_out = tmp.path().join("our_shifted.bam");
+    run_ours(input_bam, &our_out);
 
-    assert_eq!(
-        our_records.len(),
-        dt_records.len(),
-        "record count mismatch: ours={} deeptools={}",
-        our_records.len(),
-        dt_records.len()
-    );
-
-    for (i, (ours, dt)) in our_records.iter().zip(dt_records.iter()).enumerate() {
-        assert_eq!(
-            ours.0, dt.0,
-            "record {i}: name mismatch: {:?} vs {:?}",
-            ours.0, dt.0
-        );
-        assert_eq!(
-            ours.1, dt.1,
-            "record {i} ({}): flag mismatch: {} vs {}",
-            ours.0, ours.1, dt.1
-        );
-        assert_eq!(
-            ours.2, dt.2,
-            "record {i} ({}): POS mismatch: {} vs {} (deeptools)",
-            ours.0, ours.2, dt.2
-        );
-        assert_eq!(
-            ours.3, dt.3,
-            "record {i} ({}): CIGAR mismatch: {:?} vs {:?} (deeptools)",
-            ours.0, ours.3, dt.3
-        );
-        assert_eq!(
-            ours.4, dt.4,
-            "record {i} ({}): TLEN mismatch: {} vs {}",
-            ours.0, ours.4, dt.4
-        );
-        assert_eq!(
-            ours.5, dt.5,
-            "record {i} ({}): PNEXT mismatch: {} vs {}",
-            ours.0, ours.5, dt.5
-        );
-    }
+    let our_records = parse_sam_fields_sorted(&bam_to_sam_text(&our_out));
+    let golden_records = parse_sam_fields_sorted(&bam_to_sam_text(golden_bam));
+    assert_fields_eq(&our_records, &golden_records, "golden");
 }
 
 #[test]
@@ -182,4 +180,22 @@ fn atac_shift_softclip_compat() {
     }
 
     run_compat_check(&input_bam);
+}
+
+#[test]
+fn atac_shift_matches_golden() {
+    let fixtures = fixture_dir();
+    run_golden_check(
+        &fixtures.join("atac_small.bam"),
+        &fixtures.join("golden_shifted.bam"),
+    );
+}
+
+#[test]
+fn atac_shift_softclip_matches_golden() {
+    let fixtures = fixture_dir();
+    run_golden_check(
+        &fixtures.join("bench_small.bam"),
+        &fixtures.join("golden_bench_shifted.bam"),
+    );
 }
